@@ -1,0 +1,7 @@
+name = "nlc-relay"
+main = "src/index.ts"
+compatibility_date = "2026-10-02"
+workers_dev = true
+
+# L’API connect() de Cloudflare est requise pour ouvrir les sockets TCP sortants.
+compatibility_flags = ["nodejs_compat"]

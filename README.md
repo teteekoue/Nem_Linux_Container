@@ -1,4 +1,74 @@
-# NemLinux Container (NLC) — 文档 technique complète
+# NemLinux Container (NLC)
+
+## État du dépôt
+
+Le moteur MVP est organisé autour de v86, xterm.js, IndexedDB et Google Drive côté navigateur. Le dépôt contient aussi le Worker Cloudflare et les outils pour construire une image Alpine x86. Les artefacts volumineux (image, noyau, BIOS et WebAssembly) sont produits ou copiés localement dans `public/assets/` et ne sont pas versionnés.
+
+### Prérequis
+
+- Node.js 20+ et npm
+- Docker avec prise en charge de l’architecture `linux/386` (pour l’image Alpine)
+- `e2fsprogs` (`mkfs.ext2`) sur la machine de construction
+- Pour le déploiement du Worker : un compte Cloudflare et Wrangler
+
+### Installation et lancement
+
+```sh
+npm install
+npm run build:alpine
+npm run dev
+```
+
+La compilation statique s’effectue avec `npm run build`, et peut être prévisualisée avec `npm run preview`. Le build copie le WebAssembly depuis le paquet npm v86 et les BIOS depuis le dépôt officiel v86 dans `public/assets/`. La création de l’image racine x86, de son noyau et de son initramfs est séparée et nécessite Docker. `IMAGE_SIZE_MB` peut être défini au lancement du script (60 Mo par défaut).
+
+Les options de démarrage sont disponibles dans `.env` (partir de `.env.example`) :
+
+```dotenv
+VITE_NETWORK_RELAY_URL=wss://nlc-relay.<votre-domaine>.workers.dev
+VITE_GOOGLE_CLIENT_ID=<identifiant-client-Google>
+```
+
+Pour utiliser Google Drive, activer l’API Drive et configurer l’identifiant OAuth Web côté Google avec l’origine de l’application. L’application demande uniquement le scope `drive.file`; aucun secret OAuth n’est placé dans le client. Les jetons d’accès sont conservés dans IndexedDB et expirent sans renouvellement automatique.
+
+### Construire et publier le Worker
+
+```sh
+cd worker
+npm install
+npm run deploy
+```
+
+`wrangler.toml` utilise la compatibilité Workers requise par `cloudflare:sockets`. La route racine parle le protocole WISP attendu par v86; `/browser-socket` conserve l’endpoint fourni par `@gvibehacker/browser-socket-cloudflare-worker`. Les connexions WISP sont limitées aux ports TCP 80 et 443 et à 50 flux par session WebSocket. Ce relais ne doit pas être considéré comme un proxy public généraliste.
+
+### Persistance du disque
+
+La même `ArrayBuffer` ext2 est fournie au disque IDE de v86 et aux sauvegardes IndexedDB. La version v86 verrouillée dans le lockfile écrit les secteurs IDE dans ce buffer. L’export de disque copie donc l’image ext2 modifiée, sans enregistrer la RAM ni utiliser `save_state()` / `restore_state()`. Les tests unitaires couvrent IndexedDB, les flushs du cycle de vie et l’upload Drive par chunks de 8 Mio; `npm run test:boot` démarre la VM et vérifie une écriture réellement faite dans le système invité. Google Drive ne ré-envoie l’image que si son empreinte SHA-256 a changé.
+
+### Tests
+
+```sh
+npm test
+npm run test:boot
+```
+
+`npm run test:boot` suppose que `npm run build:alpine` et `npm run assets:v86` ont déjà été exécutés. Les tests unitaires vérifient IndexedDB (disque et jeton OAuth), le cycle de vie, l’upload resumable et le décodage des trames WISP.
+
+### Arborescence
+
+- `src/v86/` : configuration et démarrage v86.
+- `src/terminal/` : console série xterm.js.
+- `src/persistence/` : IndexedDB et API Google Drive resumable.
+- `src/network/` : validation de l’URL du relais réseau.
+- `src/lifecycle/` : démarrage, reprise et flush local/cloud.
+- `worker/` : Worker Cloudflare, passerelle WISP v86, endpoint browser-socket et configuration Wrangler.
+- `scripts/alpine/` : Dockerfile pour Alpine x86.
+- `scripts/build-alpine.sh` : génération de `alpine-v1.ext2`, `bzImage` et `initramfs-lts`. Le terminal série ouvre un shell root local sans invite d’authentification, pour le bac à sable privé de l’utilisateur.
+
+Le terminal fourni est une interface minimale de validation du moteur, pas l’interface produit finale.
+
+---
+
+## Documentation technique et décisions MVP
 
 ## Philosophie du projet
 
@@ -80,7 +150,7 @@ La mémoire de la VM est **fixée au démarrage** (généralement **128 Mo ou 25
 
 ### Réseau — Le relais WebSocket
 
-**v86 ne peut pas accéder à Internet directement.** L’émulation réseau passe par un **relais WebSocket** (`network_relay_url`). Le relais traduit les paquets Ethernet de la VM en requêtes compréhensibles par le navigateur, puis fait l’inverse pour les réponses .
+**v86 ne peut pas accéder à Internet directement.** L’émulation réseau passe par un **relais WebSocket** (`network_relay_url`). L’adaptateur réseau virtuel de v86 convertit le trafic TCP de l’invité en flux WISP; le Worker ouvre les connexions sortantes via l’API Cloudflare `connect()`.
 
 Sans ce relais, la VM Alpine est **isolée** : pas de `apk update`, pas d’installation de paquets, pas de `curl`.
 
@@ -89,9 +159,9 @@ Sans ce relais, la VM Alpine est **isolée** : pas de `apk update`, pas d’inst
 - `krishenriksen/node-relay` — alternative Node.js 
 - `@gvibehacker/browser-socket-cloudflare-worker` — **Cloudflare Worker** qui termine les connexions WebSocket et proxifie via l’API `connect()` de Cloudflare 
 
-**Choix pour NLC** : Cloudflare Workers est privilégié car **gratuit** et sans infrastructure à maintenir. Le Worker utilise `@gvibehacker/browser-socket-cloudflare-worker` pour router le trafic TCP depuis la VM vers Internet .
+**Choix pour NLC** : Cloudflare Workers est privilégié car il évite de maintenir une infrastructure de calcul. La route racine du Worker implémente WISP pour assurer la compatibilité avec v86; la route `/browser-socket` expose aussi `@gvibehacker/browser-socket-cloudflare-worker`, dont le protocole distinct n’est pas directement utilisable comme relais v86.
 
-**Limite connue** : le plan gratuit Cloudflare Workers impose **50 sous-requêtes externes par invocation**. Une invocation = une session WebSocket. Pour un usage léger (installation de paquets, `curl` ponctuel), c’est suffisant. Pour du transfert massif, une migration vers un VPS sera nécessaire.
+**Limite connue** : le relais autorise au plus **50 flux TCP par session WebSocket**, sur les ports 80 et 443. Cela vise l’usage léger (installation de paquets, `curl` ponctuel), pas les transferts massifs ni les autres protocoles.
 
 
 ## Persistance des données
@@ -183,45 +253,24 @@ L’image Alpine (50-60 Mo) doit être servie depuis un **hébergement statique*
 
 ### Fonctionnement
 
-Le Worker Cloudflare utilise `@gvibehacker/browser-socket-cloudflare-worker` pour :
+La route racine du Worker parle le protocole WISP pris en charge par v86. Elle :
 
-1. Accepter les connexions WebSocket entrantes depuis le navigateur (v86).
-2. Multiplexer chaque flux TCP.
-3. Proxifier via l’API `connect()` de Cloudflare .
+1. Accepte la connexion WebSocket du navigateur.
+2. Ouvre les flux TCP demandés par v86 via l’API `connect()` de Cloudflare.
+3. Limite les destinations aux ports HTTP/HTTPS 80 et 443, avec un maximum de 50 flux par session.
 
-**Code simplifié** :
-```javascript
-import { Connection } from "@gvibehacker/browser-socket-cloudflare-worker";
-
-export default {
-  async fetch(request) {
-    if (request.headers.get("Upgrade") !== "websocket") {
-      return new Response("NLC relay", { status: 200 });
-    }
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    const connection = new Connection(server);
-    connection.addEventListener("connect", async (event) => {
-      const [socket, { host, port }] = event.detail;
-      const tcp = connect({ hostname: host, port: port });
-      socket.readable.pipeTo(tcp.writable);
-      tcp.readable.pipeTo(socket.writable);
-    });
-    return new Response(null, { status: 101, webSocket: client });
-  },
-};
-```
+La route `/browser-socket` utilise séparément `@gvibehacker/browser-socket-cloudflare-worker` pour ses clients compatibles. Ce protocole transporte aussi des flux TCP mais n’est pas le protocole WISP attendu par v86.
 
 ### Configuration v86
 
-Côté navigateur, v86 est configuré avec :
+Côté navigateur, l’application prend une URL `wss://` dans `VITE_NETWORK_RELAY_URL` et la convertit au format WISP de v86 (`wisps://`). Pour une configuration directe v86 :
 ```javascript
-network_relay_url: "wss://nlc-relay.votre-domaine.workers.dev"
+network_relay_url: "wisps://nlc-relay.votre-domaine.workers.dev"
 ```
 
 ### Limites
 
-- **50 sous-requêtes par invocation** (plan gratuit).
+- **50 flux TCP maximum par session WebSocket**, sur les ports 80 et 443.
 - **Usage léger** : installation de paquets, `curl` ponctuel.
 - **Pas de transfert massif** : pas de streaming vidéo, pas de téléchargements volumineux.
 
