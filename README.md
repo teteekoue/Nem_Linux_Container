@@ -1,8 +1,14 @@
 # NemLinux Container (NLC)
 
-## État du dépôt
+## Interface de test locale
 
-Le moteur MVP est organisé autour de v86, xterm.js, IndexedDB et Google Drive côté navigateur. Le dépôt contient aussi le Worker Cloudflare et les outils pour construire une image Alpine x86. Les artefacts volumineux (image, noyau, BIOS et WebAssembly) sont produits ou copiés localement dans `public/assets/` et ne sont pas versionnés.
+`npm run dev` lance une interface minimale sans compte, réseau invité ni Google Drive. Elle démarre Alpine automatiquement lorsqu’aucune sauvegarde n’existe, propose de reprendre ou d’effacer une session existante, et sauvegarde le disque dans IndexedDB toutes les cinq secondes après une écriture invitée. Les sauvegardes inchangées sont ignorées pour éviter de recopier le disque complet inutilement. L’image de développement préinstalle Bash, Git, Nano et Python 3/pip, en plus des commandes BusyBox d’Alpine. Tous les logs noyau sont affichés (`loglevel=7 ignore_loglevel`) et capturés par lots, sans limite de durée de démarrage ni de taille de journal. Le statut « Prêt » apparaît après réception de l’invite shell Alpine; une erreur de téléchargement ou l’arrêt de v86 avant cette invite est signalé immédiatement. En mode développement, la sortie série est automatiquement envoyée au serveur Vite local et consultable à `/__nlc/diagnostics` (ou avec `curl http://localhost:5173/__nlc/diagnostics` depuis l’environnement qui exécute Vite). Elle peut aussi être copiée ou téléchargée depuis la barre d’outils.
+
+Pour repartir directement d’une image propre sans reprendre l’ancienne sauvegarde IndexedDB, ouvrir l’interface avec `?reset-session=1` (par exemple `http://localhost:5173/?reset-session=1`). Le disque sauvegardé est alors supprimé et l’image Alpine fraîche démarre automatiquement; le paramètre est retiré de l’URL ensuite.
+
+Le terminal xterm.js visible est directement relié au port série v86 : les frappes sont envoyées à la VM et sa sortie est affichée et conservée pour le diagnostic. Aucun terminal série supplémentaire v86 ni carte réseau invitée n’est créé.
+
+Le moteur MVP comprend également des modules de relais réseau et de synchronisation Google Drive, mais ils ne sont pas exposés par cette interface de test. Le dépôt contient les outils pour construire une image Alpine x86. Les artefacts volumineux (image, noyau, BIOS et WebAssembly) sont produits ou copiés localement dans `public/assets/` et ne sont pas versionnés.
 
 ### Prérequis
 
@@ -19,7 +25,7 @@ npm run build:alpine
 npm run dev
 ```
 
-La compilation statique s’effectue avec `npm run build`, et peut être prévisualisée avec `npm run preview`. Le build copie le WebAssembly depuis le paquet npm v86 et les BIOS depuis le dépôt officiel v86 dans `public/assets/`. La création de l’image racine x86, de son noyau et de son initramfs est séparée et nécessite Docker. `IMAGE_SIZE_MB` peut être défini au lancement du script (60 Mo par défaut).
+La compilation statique s’effectue avec `npm run build`, et peut être prévisualisée avec `npm run preview`. Le build copie le WebAssembly depuis le paquet npm v86 et les BIOS depuis le dépôt officiel v86 dans `public/assets/`. La création de l’image racine x86, de son noyau et de son initramfs est séparée et nécessite Docker. Le disque ext2 de 128 Mo est distribué compressé en gzip afin de réduire le téléchargement initial, puis décompressé dans le navigateur avant le démarrage. `IMAGE_SIZE_MB` peut être défini au lancement du script (128 Mo par défaut).
 
 Les options de démarrage sont disponibles dans `.env` (partir de `.env.example`) :
 
@@ -42,7 +48,7 @@ npm run deploy
 
 ### Persistance du disque
 
-La même `ArrayBuffer` ext2 est fournie au disque IDE de v86 et aux sauvegardes IndexedDB. La version v86 verrouillée dans le lockfile écrit les secteurs IDE dans ce buffer. L’export de disque copie donc l’image ext2 modifiée, sans enregistrer la RAM ni utiliser `save_state()` / `restore_state()`. Les tests unitaires couvrent IndexedDB, les flushs du cycle de vie et l’upload Drive par chunks de 8 Mio; `npm run test:boot` démarre la VM et vérifie une écriture réellement faite dans le système invité. Google Drive ne ré-envoie l’image que si son empreinte SHA-256 a changé.
+La même `ArrayBuffer` ext2 est fournie au disque IDE de v86 et aux sauvegardes IndexedDB. La version v86 verrouillée dans le lockfile écrit les secteurs IDE dans ce buffer. L’événement v86 `ide-write-end` marque les modifications disque : l’export IndexedDB et l’upload Drive ne recopient donc pas une image inchangée à chaque cycle. L’export de disque copie l’image ext2 modifiée, sans enregistrer la RAM ni utiliser `save_state()` / `restore_state()`. Les tests unitaires couvrent IndexedDB, les flushs du cycle de vie et l’upload Drive par chunks de 8 Mio; `npm run test:boot` démarre la VM, vérifie les outils de développement et une écriture réellement faite dans le système invité. Google Drive ne ré-envoie l’image que si son empreinte SHA-256 a changé.
 
 ### Tests
 
@@ -51,7 +57,7 @@ npm test
 npm run test:boot
 ```
 
-`npm run test:boot` suppose que `npm run build:alpine` et `npm run assets:v86` ont déjà été exécutés. Les tests unitaires vérifient IndexedDB (disque et jeton OAuth), le cycle de vie, l’upload resumable et le décodage des trames WISP.
+Le test de fumée `tests/interface-smoke.test.ts` vérifie que le serveur Vite sert la page et son point d’entrée. `npm run test:boot` suppose que `npm run build:alpine` et `npm run assets:v86` ont déjà été exécutés. Les tests unitaires vérifient IndexedDB (disque et jeton OAuth), le cycle de vie, l’upload resumable et le décodage des trames WISP.
 
 ### Arborescence
 
@@ -74,7 +80,7 @@ Le terminal fourni est une interface minimale de validation du moteur, pas l’i
 
 **NemLinux Container (NLC)** est un environnement Linux léger émulé directement dans le navigateur. L’idée fondatrice est simple : offrir un accès instantané à un terminal Linux fonctionnel, sans installation, sans configuration, et sans dépendre d’un serveur de calcul distant.
 
-Chaque instance NLC est une **machine virtuelle x86 32 bits** exécutée localement via l’émulateur **v86** (JavaScript/WebAssembly). L’utilisateur interagit avec un terminal standard (`xterm.js`) et dispose d’une distribution **Alpine Linux** minimale, capable d’exécuter des commandes, d’installer des paquets via `apk`, et de manipuler des fichiers.
+Chaque instance NLC est une **machine virtuelle x86 32 bits** exécutée localement via l’émulateur **v86** (JavaScript/WebAssembly). L’utilisateur interagit avec un terminal standard (`xterm.js`) et dispose d’une distribution **Alpine Linux** avec BusyBox, Bash, Git, Nano, Python 3 et pip. `apk` est présent, mais l’image de test reste hors ligne : seuls les paquets déjà présents ou fournis localement peuvent être installés.
 
 Le projet repose sur trois principes :
 
@@ -122,18 +128,18 @@ Le flux est le suivant :
 - Les extensions 64 bits ne sont **pas supportées** . C’est la raison pour laquelle NLC utilise Alpine en 32 bits.
 - Certaines fonctionnalités sont manquantes : task gates, far calls en mode protégé, débogage pas à pas, certaines exceptions FPU/SSE .
 
-**Performance** : les temps de démarrage typiques se situent entre **10 et 30 secondes** selon l’appareil et la connexion . Une Alpine minimale peut descendre en dessous de 5 secondes avec un cache navigateur chaud.
+**Performance** : le démarrage dépend fortement du navigateur et du processeur hôte. Le test de boot réel atteint l’invite Alpine en environ **55 secondes** dans l’environnement de développement local. NLC utilise un seul processeur virtuel (`nosmp`) et n’inclut pas de périphérique ou de service réseau dans cette image de test.
 
 
 ### Alpine Linux 32 bits — L’image invitée
 
 **Alpine Linux** est une distribution ultra-légère, conçue pour la sécurité et la simplicité. C’est le choix idéal pour NLC car :
 
-- **Taille minimale** : une image Alpine avec `apk` fonctionnel pèse entre **5 et 15 Mo**.
+- **Outils de développement** : Bash, Git, Nano et Python 3/pip sont préinstallés dans l’image NLC.
 - **Compatibilité v86** : v86 supporte officiellement Alpine. Une image peut être construite à partir d’un Dockerfile via les outils fournis dans `tools/docker/alpine/` .
 - **32 bits** : l’architecture x86 32 bits est supportée nativement par v86.
 
-**Construction de l’image** : l’approche recommandée est d’utiliser un **Dockerfile** définissant un environnement Alpine minimal, puis de générer l’image via des scripts éprouvés (comme `env86` ou les outils v86). L’image résultante contient généralement un système de fichiers racine `ext2` d’environ **50-60 Mo**.
+**Construction de l’image** : le Dockerfile construit un système de fichiers racine `ext2` de **128 Mo** par défaut, avec l’espace nécessaire aux outils préinstallés et aux fichiers de travail.
 
 
 ### xterm.js — L’interface
@@ -152,7 +158,7 @@ La mémoire de la VM est **fixée au démarrage** (généralement **128 Mo ou 25
 
 **v86 ne peut pas accéder à Internet directement.** L’émulation réseau passe par un **relais WebSocket** (`network_relay_url`). L’adaptateur réseau virtuel de v86 convertit le trafic TCP de l’invité en flux WISP; le Worker ouvre les connexions sortantes via l’API Cloudflare `connect()`.
 
-Sans ce relais, la VM Alpine est **isolée** : pas de `apk update`, pas d’installation de paquets, pas de `curl`.
+Sans ce relais, la VM Alpine est **isolée** : pas de `apk update` ni d’installation de paquets à la demande. Les outils de développement nécessaires sont préinstallés dans l’image.
 
 **Implémentations existantes** :
 - `benjamincburns/websockproxy` — l’implémentation originale 
@@ -176,16 +182,16 @@ NLC sépare strictement **le calcul** (local, dans le navigateur) et **le stocka
 
 - **Stockage local** : les données survivent aux rechargements de page.
 - **Latence zéro** : accès instantané, pas de réseau.
-- **Capacité** : dépend du navigateur, mais généralement suffisante pour des dizaines de mégaoctets.
+- **Capacité** : dépend du navigateur et de l’espace local disponible.
 
-**Fonctionnement** : toutes les 5 secondes (après la dernière modification), l’image disque de la VM est sérialisée et écrite dans IndexedDB. Un **flush final** est déclenché sur `beforeunload` / `visibilitychange` pour capturer les dernières modifications avant fermeture.
+**Fonctionnement** : toutes les 5 secondes au maximum après une écriture disque, l’image modifiée de la VM est copiée dans IndexedDB. Les intervalles sans écriture invitée ne déclenchent pas de copie. Un **flush final** est aussi déclenché sur `beforeunload` / `visibilitychange`.
 
 ### Niveau 2 — Google Drive (cloud, optionnel)
 
 Si l’utilisateur connecte son compte Google, l’image disque est également synchronisée vers **Google Drive**.
 
 **Pourquoi Google Drive** :
-- **15 Go gratuits** : largement suffisant pour stocker plusieurs images Alpine (50-60 Mo chacune).
+- **15 Go gratuits** : largement suffisant pour stocker plusieurs images NLC (128 Mo chacune par défaut).
 - **API accessible côté client** : via **Google Identity Services** .
 - **Scope minimal** : `drive.file` — l’application ne voit que les fichiers qu’elle a créés.
 
@@ -218,7 +224,7 @@ Si l’utilisateur connecte son compte Google, l’image disque est également s
 3. **Chargement** : téléchargement de l’image Alpine, du noyau, des fichiers v86.
 4. **Démarrage** : la VM boote, le terminal s’affiche.
 
-Objectif : **< 5 secondes** pour le démarrage après le premier chargement (cache navigateur).
+Objectif du MVP : atteindre l’invite Alpine en **moins d’une minute** sur un appareil compatible; le test local mesuré est à environ 55 secondes.
 
 ### Session en cours
 
@@ -240,7 +246,7 @@ Objectif : **< 5 secondes** pour le démarrage après le premier chargement (cac
 
 ## Distribution de l’image
 
-L’image Alpine (50-60 Mo) doit être servie depuis un **hébergement statique** :
+L’image Alpine (128 Mo par défaut) doit être servie depuis un **hébergement statique** :
 
 - **Cloudflare R2** : stockage objet, rapide, gratuit jusqu’à 10 Go.
 - **GitHub Pages** : gratuit, mais bande passante limitée.

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUTPUT="${ROOT}/public/assets"
 TMP="$(mktemp -d)"
 IMAGE_TAG="nlc-alpine-builder:local"
-IMAGE_SIZE_MB="${IMAGE_SIZE_MB:-60}"
+IMAGE_SIZE_MB="${IMAGE_SIZE_MB:-128}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker est requis pour construire Alpine x86." >&2
@@ -36,12 +36,15 @@ docker run --rm --platform linux/386 -e IMAGE_SIZE_MB="${IMAGE_SIZE_MB}" -v "${T
   mknod -m 666 /tmp/rootfs/dev/urandom c 1 9
   truncate -s "${IMAGE_SIZE_MB}M" /out/alpine-v1.ext2
   mkfs.ext2 -F -q -m 0 -b 1024 -d /tmp/rootfs /out/alpine-v1.ext2
+  gzip -n -9 -c /out/alpine-v1.ext2 > /out/alpine-v1.ext2.gz.bin
 '
 
 cp "${TMP}/bzImage" "${OUTPUT}/bzImage"
 cp "${TMP}/initramfs-lts" "${OUTPUT}/initramfs-lts"
-cp "${TMP}/alpine-v1.ext2" "${OUTPUT}/alpine-v1.ext2"
+cp "${TMP}/alpine-v1.ext2.gz.bin" "${OUTPUT}/alpine-v1.ext2.gz.bin"
+rm -f "${OUTPUT}/alpine-v1.ext2"
+rm -f "${OUTPUT}/alpine-v1.ext2.gz"
 
-echo "Image générée : ${OUTPUT}/alpine-v1.ext2 ($(du -h "${OUTPUT}/alpine-v1.ext2" | cut -f1))"
+echo "Image gzip générée : ${OUTPUT}/alpine-v1.ext2.gz.bin ($(du -h "${OUTPUT}/alpine-v1.ext2.gz.bin" | cut -f1))"
 echo "Noyau généré : ${OUTPUT}/bzImage"
 echo "Initramfs généré : ${OUTPUT}/initramfs-lts ($(du -h "${OUTPUT}/initramfs-lts" | cut -f1))"

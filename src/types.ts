@@ -25,4 +25,5 @@ export interface VmEngine {
   start(disk: ArrayBuffer, memoryMb: number): Promise<void>;
   stop(): Promise<void>;
   exportDisk(): Promise<ArrayBuffer>;
+  getDiskRevision(): number;
 }

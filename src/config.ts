@@ -1,7 +1,7 @@
 /** Configuration centrale du moteur NemLinux Container. */
 export const NLC_CONFIG = {
   assets: {
-    rootfs: "/assets/alpine-v1.ext2",
+    rootfs: "/assets/alpine-v1.ext2.gz.bin",
     kernel: "/assets/bzImage",
     initrd: "/assets/initramfs-lts",
     bios: "/assets/seabios.bin",

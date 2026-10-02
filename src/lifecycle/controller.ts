@@ -8,6 +8,7 @@ export class VmLifecycle {
   private saveTimer?: ReturnType<typeof setTimeout>;
   private saveQueue: Promise<void> = Promise.resolve();
   private activeFlush?: Promise<void>;
+  private lastSavedDiskRevision?: number;
   private driveSync?: GoogleDriveSync;
   private lastDriveDigest?: string;
   private readonly listeners = new Set<(status: VmStatus) => void>();
@@ -95,6 +96,8 @@ export class VmLifecycle {
   }
 
   private async performFlush(): Promise<void> {
+    const revision = this.engine.getDiskRevision();
+    if (revision === this.lastSavedDiskRevision) return;
     const snapshot: DiskSnapshot = {
       key: this.diskKey,
       data: await this.engine.exportDisk(),
@@ -111,13 +114,17 @@ export class VmLifecycle {
       }
     });
     await this.saveQueue;
+    this.lastSavedDiskRevision = revision;
   }
 
   async startDriveSync(sync: GoogleDriveSync): Promise<void> {
     this.driveSync = sync;
     const token = await sync.getUsableToken();
     if (!token.value) throw new Error("Jeton Google Drive vide.");
-    if (this.status === "running") await this.flush();
+    if (this.status === "running") {
+      this.lastSavedDiskRevision = undefined;
+      await this.flush();
+    }
   }
 
   detachDriveSync(): void {
@@ -145,7 +152,9 @@ export class VmLifecycle {
 
   private async boot(disk: ArrayBuffer, memoryMb: number): Promise<void> {
     this.setStatus("starting");
+    const revisionBeforeBoot = this.engine.getDiskRevision();
     await this.engine.start(disk, memoryMb);
+    this.lastSavedDiskRevision = revisionBeforeBoot;
     this.setStatus("running");
     this.scheduleSave();
   }
@@ -169,7 +178,11 @@ export class VmLifecycle {
   private async downloadRootfs(): Promise<ArrayBuffer> {
     const response = await fetch(this.rootfsUrl);
     if (!response.ok) throw new Error(`Téléchargement de l’image Alpine impossible (${response.status}).`);
-    return response.arrayBuffer();
+    if (!response.body || !("DecompressionStream" in globalThis)) {
+      throw new Error("Ce navigateur ne prend pas en charge la décompression gzip de l’image Alpine.");
+    }
+    const decompressed = response.body.pipeThrough(new DecompressionStream("gzip"));
+    return new Response(decompressed).arrayBuffer();
   }
 
   private async digest(data: ArrayBuffer): Promise<string> {

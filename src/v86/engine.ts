@@ -2,15 +2,36 @@ import { Terminal } from "@xterm/xterm";
 import { V86 } from "v86";
 import type { VmEngine } from "../types";
 import { NLC_CONFIG } from "../config";
-import { NetworkRelay } from "../network/relay";
 
 /** Initialisation v86, boot Alpine x86 et accès à l’image disque du moteur. */
 export class V86Engine implements VmEngine {
   private emulator?: InstanceType<typeof V86>;
   private diskBuffer?: ArrayBuffer;
-  private readonly relay = new NetworkRelay(NLC_CONFIG.relayUrl);
+  private serialOutput = "";
+  private pendingBytes: number[] = [];
+  private outputFlushTimer?: number;
+  private readonly renderDecoder = new TextDecoder();
+  private bootCheck?: () => void;
+  private bootOutputTail = "";
+  private diskRevision = 0;
+  private readonly outputListeners = new Set<(output: string) => void>();
 
-  constructor(private readonly terminal: Terminal) {}
+  constructor(private readonly terminal: Terminal) {
+    this.terminal.onData((data) => this.emulator?.serial0_send(data));
+  }
+
+  getSerialOutput(): string {
+    return this.serialOutput;
+  }
+
+  getDiskRevision(): number {
+    return this.diskRevision;
+  }
+
+  onSerialOutput(listener: (output: string) => void): () => void {
+    this.outputListeners.add(listener);
+    return () => this.outputListeners.delete(listener);
+  }
 
   async start(disk: ArrayBuffer, memoryMb: number): Promise<void> {
     if (this.emulator) throw new Error("La machine virtuelle est déjà initialisée.");
@@ -23,6 +44,8 @@ export class V86Engine implements VmEngine {
       this.fetchAsset(NLC_CONFIG.assets.vgaBios),
     ]);
 
+    this.bootOutputTail = "";
+    this.diskRevision = 0;
     const emulator = new V86({
       wasm_path: NLC_CONFIG.assets.wasm,
       memory_size: memoryMb * 1024 * 1024,
@@ -32,22 +55,20 @@ export class V86Engine implements VmEngine {
       initrd: { buffer: initrd },
       hda: { buffer: disk },
       cmdline:
-        "root=/dev/sda rw rootflags=rw rootfstype=ext2 modules=ne2k-pci console=ttyS0,115200n8 noapic nolapic acpi=off",
+        "root=/dev/sda rw rootflags=rw rootfstype=ext2 console=ttyS0,115200n8 noapic nolapic acpi=off loglevel=7 ignore_loglevel nosmp",
       autostart: true,
-      serial_console: {
-        type: "xtermjs",
-        container: this.terminal.element?.parentElement ?? document.body,
-        xterm_lib: Terminal,
-      },
-      net_device: {
-        type: "ne2k",
-        ...(this.relay.enabled ? { relay_url: this.relay.v86Url } : {}),
-      },
+      serial_console: { type: "none" },
     });
     this.emulator = emulator;
+    emulator.add_listener("serial0-output-byte", this.handleSerialByte);
+    emulator.add_listener("ide-write-end", () => {
+      this.diskRevision += 1;
+    });
     try {
-      await this.waitFor(emulator, "emulator-started");
+      await this.waitForBoot(emulator);
+      this.flushSerialOutput();
     } catch (error) {
+      this.flushSerialOutput();
       await emulator.destroy();
       this.emulator = undefined;
       this.diskBuffer = undefined;
@@ -58,9 +79,11 @@ export class V86Engine implements VmEngine {
   async stop(): Promise<void> {
     const emulator = this.emulator;
     if (!emulator) return;
+    this.flushSerialOutput();
     await emulator.destroy();
     this.emulator = undefined;
     this.diskBuffer = undefined;
+    this.diskRevision = 0;
   }
 
   async exportDisk(): Promise<ArrayBuffer> {
@@ -74,17 +97,57 @@ export class V86Engine implements VmEngine {
     return response.arrayBuffer();
   }
 
-  private waitFor(emulator: InstanceType<typeof V86>, event: "emulator-started"): Promise<void> {
+  private readonly handleSerialByte = (byte: number): void => {
+    this.pendingBytes.push(byte);
+    if (this.outputFlushTimer === undefined) {
+      this.outputFlushTimer = window.setTimeout(() => this.flushSerialOutput(), 16);
+    }
+  };
+
+  private flushSerialOutput(): void {
+    if (this.outputFlushTimer !== undefined) {
+      window.clearTimeout(this.outputFlushTimer);
+      this.outputFlushTimer = undefined;
+    }
+    if (this.pendingBytes.length === 0) return;
+    const output = this.renderDecoder.decode(Uint8Array.from(this.pendingBytes), { stream: true });
+    this.pendingBytes = [];
+    if (output) {
+      this.serialOutput += output;
+      this.bootOutputTail = (this.bootOutputTail + output).slice(-128);
+      for (const listener of this.outputListeners) listener(output);
+      this.bootCheck?.();
+    }
+    this.terminal.write(output);
+  }
+
+  private waitForBoot(emulator: InstanceType<typeof V86>): Promise<void> {
     return new Promise((resolve, reject) => {
-      const timeout = window.setTimeout(() => reject(new Error("Délai dépassé pendant le démarrage de v86.")), 60_000);
-      emulator.add_listener(event, () => {
-        window.clearTimeout(timeout);
-        resolve();
+      let emulatorStarted = false;
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        this.bootCheck = undefined;
+        if (error) reject(error);
+        else resolve();
+      };
+      this.bootCheck = () => {
+        if (emulatorStarted && this.bootOutputTail.includes("~ # ")) {
+          finish();
+        }
+      };
+      emulator.add_listener("emulator-started", () => {
+        emulatorStarted = true;
+        this.bootCheck?.();
       });
       emulator.add_listener("download-error", (detail) => {
-        window.clearTimeout(timeout);
-        reject(new Error(`Erreur de chargement v86 : ${detail.file_name}.`));
+        finish(new Error(`Erreur de chargement v86 : ${detail.file_name}.`));
       });
+      emulator.add_listener("emulator-stopped", () => {
+        finish(new Error("v86 s’est arrêté avant l’invite de commande Alpine."));
+      });
+      this.bootCheck();
     });
   }
 }

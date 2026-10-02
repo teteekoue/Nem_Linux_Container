@@ -4,25 +4,34 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#111827" />
-    <title>NemLinux Container</title>
+    <title>Terminal Linux — test</title>
   </head>
   <body>
     <main>
-      <header>
-        <h1>NemLinux Container</h1>
-        <p>Votre Linux dans le navigateur</p>
-      </header>
-      <section class="controls" aria-label="Cycle de vie de la machine virtuelle">
-        <label for="memory">Mémoire</label>
-        <select id="memory">
-          <option value="128">128 Mo</option>
-          <option value="256">256 Mo</option>
-        </select>
+      <section class="toolbar" aria-label="État de la machine virtuelle">
+        <div class="status-line">
+          <span id="status-indicator" aria-hidden="true"></span>
+          <span id="status" role="status" aria-live="polite">Chargement…</span>
+        </div>
+        <div class="actions">
+          <button id="copy-logs" type="button" title="Copier la sortie série récente">Copier les logs</button>
+          <button id="download-logs" type="button" title="Télécharger la sortie série récente">Télécharger les logs</button>
+          <button id="restart" type="button" disabled>Redémarrer</button>
+          <button id="clear-session" type="button" disabled>Effacer la session</button>
+        </div>
+        <span id="log-action-status" role="status" aria-live="polite"></span>
+      </section>
+      <section id="session-choice" class="session-choice" aria-label="Session précédente" hidden>
+        <p>Une session précédente a été trouvée.</p>
         <button id="resume" type="button">Reprendre la session</button>
         <button id="fresh" type="button">Nouvelle session</button>
-        <button id="connect-drive" type="button">Connecter Google Drive</button>
-        <span id="status" role="status" aria-live="polite">Prêt</span>
       </section>
+      <section id="loading" class="loading" aria-live="polite">
+        <progress aria-label="Chargement de la machine virtuelle"></progress>
+        <span id="loading-message">Vérification de la session…</span>
+      </section>
+      <p id="error-message" class="error-message" role="alert" hidden></p>
+      <button id="retry" class="retry" type="button" hidden>Réessayer</button>
       <div id="terminal" aria-label="Terminal Linux"></div>
     </main>
     <script type="module" src="/src/main.ts"></script>
